@@ -50,7 +50,7 @@ function encodeHeight(revenue: number): number {
 
 function encodeWidth(runtime: number): number {
   if (!runtime || runtime <= 0) return 1.8;
-  return clamp(1.2 + ((runtime - 60) / 140) * 1.6, 1.2, 2.8);
+  return clamp(1.2 + ((runtime - 60) / 140) * 1.6, 1.8, 2.8);
 }
 
 function encodeDepth(voteAverage: number): number {

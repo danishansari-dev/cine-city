@@ -1720,7 +1720,9 @@ export default function CityShell() {
   // Watched store: loaded from localStorage on mount
   const [watchedStore, setWatchedStore] = useState<WatchedStore | null>(null);
   // Counter tracks watched count for live updates without re-reading localStorage
-  const [watchedCount, setWatchedCount] = useState(0);
+  const [watchedCount, setWatchedCount] = useState(() =>
+    getWatchedCount(loadStore()),
+  );
   const [tasteCollapsed, setTasteCollapsed] = useState(false);
   const canvasRef = useRef<CityCanvasHandle>(null);
   const pendingHoverRef = useRef<CityBuilding | null>(null);

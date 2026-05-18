@@ -45,16 +45,22 @@ function genreColor(genreIds: number[]): string {
 }
 
 function encodeHeight(revenue: number): number {
-  return clamp(Math.log10(revenue + 1) * 6, 2, 40);
+  // Higher multiplier (15) with wider clamp (4–90) produces
+  // taller, chunkier skyscrapers instead of thin needles
+  return clamp(Math.log10(revenue + 1) * 15, 4, 90);
 }
 
 function encodeWidth(runtime: number): number {
-  if (!runtime || runtime <= 0) return 1.8;
-  return clamp(1.2 + ((runtime - 60) / 140) * 1.6, 1.8, 2.8);
+  // Wider buildings (3–5 units) fill the grid and look like
+  // real city blocks rather than matchstick pins
+  if (!runtime || runtime <= 0) return 3.5;
+  return clamp(2.5 + ((runtime - 60) / 140) * 2.5, 3.0, 5.0);
 }
 
 function encodeDepth(voteAverage: number): number {
-  return Math.abs(voteAverage - 6) * 0.4 + 1;
+  // Minimum depth 2.5 ensures even average-rated films have
+  // substantial footprint visible from the skyline angle
+  return Math.abs(voteAverage - 6) * 0.6 + 2.5;
 }
 
 function deriveRenderFields(
@@ -84,7 +90,11 @@ export function encodeToCityBuilding(
   index: number,
   gridSize: number,
 ): CityBuilding {
-  const { x, z } = spiralGridPosition(index, gridSize);
+  const spiral = spiralGridPosition(index, gridSize);
+  // Tighter spacing (6.5) packs chunkier buildings close together
+  // for a dense Manhattan-like skyline — not a sparse pin-board
+  const x = spiral.x * 6.5;
+  const z = spiral.z * 6.5;
 
   // Art house proxy: films with real audiences but no box office data
   // still deserve vertical presence in the skyline

@@ -223,7 +223,7 @@ export default memo(function InstancedBuildings({
         uFaceColor: { value: new THREE.Color(colors.face) },
         uFogColor: { value: new THREE.Color("#0a1428") },
         uFogNear: { value: 500 },
-        uFogFar: { value: 3500 },
+        uFogFar: { value: 5000 },
         uFocusedId: { value: -1.0 },
         uFocusedIdB: { value: -1.0 },
         uDimOpacity: { value: 0.6 },
@@ -260,19 +260,23 @@ export default memo(function InstancedBuildings({
       const bandIndex = Math.min(5, Math.max(0, Math.round(b.litPercentage * 5)));
       const bandRowOffset = bandIndex * ATLAS_BAND_ROWS;
 
+      // UV tiling multiplier — scales window texture so individual
+      // pixels are large enough to read as chunky voxel windows
+      const UV_TILE = 4.0;
+
       // Front face UV
       const frontColStart = Math.abs(seed % Math.max(1, ATLAS_COLS - b.windowsPerFloor));
       uvF[i * 4 + 0] = frontColStart / ATLAS_COLS;
       uvF[i * 4 + 1] = bandRowOffset / ATLAS_COLS;
-      uvF[i * 4 + 2] = b.windowsPerFloor / ATLAS_COLS;
-      uvF[i * 4 + 3] = b.floors / ATLAS_COLS;
+      uvF[i * 4 + 2] = (b.windowsPerFloor / ATLAS_COLS) * UV_TILE;
+      uvF[i * 4 + 3] = (b.floors / ATLAS_COLS) * UV_TILE;
 
       // Side face UV (different column start for variety)
       const sideColStart = Math.abs((seed + 7919) % Math.max(1, ATLAS_COLS - b.sideWindowsPerFloor));
       uvS[i * 4 + 0] = sideColStart / ATLAS_COLS;
       uvS[i * 4 + 1] = bandRowOffset / ATLAS_COLS;
-      uvS[i * 4 + 2] = b.sideWindowsPerFloor / ATLAS_COLS;
-      uvS[i * 4 + 3] = b.floors / ATLAS_COLS;
+      uvS[i * 4 + 2] = (b.sideWindowsPerFloor / ATLAS_COLS) * UV_TILE;
+      uvS[i * 4 + 3] = (b.floors / ATLAS_COLS) * UV_TILE;
 
       // Rise starts at 0 (will animate to 1)
       rise[i] = 0;

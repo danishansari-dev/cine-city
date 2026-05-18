@@ -10,7 +10,7 @@ import {
 } from "react";
 import dynamic from "next/dynamic";
 import type { CityBuilding } from "@/lib/city";
-import type { CityCanvasHandle } from "@/components/CityCanvas";
+import { THEME_NAMES, type CityCanvasHandle } from "@/components/CityCanvas";
 import { GENRE_COLORS, GENRE_ID_TO_BUCKET } from "@/lib/movieEncoder";
 import {
   loadStore,
@@ -112,6 +112,67 @@ const searchWrap: CSSProperties = {
   width: 320,
   zIndex: 20,
   fontFamily: 'system-ui, -apple-system, "Segoe UI", sans-serif',
+};
+
+const flyBtnWrap: CSSProperties = {
+  position: "absolute",
+  top: 20,
+  zIndex: 21,
+  fontFamily: 'ui-monospace, SFMono-Regular, "Cascadia Code", monospace',
+};
+
+const flyBtn: CSSProperties = {
+  padding: "9px 14px",
+  fontSize: 11,
+  fontWeight: 700,
+  letterSpacing: "0.14em",
+  color: "#fff",
+  background: "rgba(10, 16, 28, 0.92)",
+  backdropFilter: "blur(8px)",
+  border: "1px solid rgba(255, 255, 255, 0.22)",
+  borderRadius: 6,
+  cursor: "pointer",
+};
+
+const flyBtnActive: CSSProperties = {
+  borderColor: "#a8d8a0",
+  color: "#a8d8a0",
+  boxShadow: "0 0 12px rgba(168, 216, 160, 0.35)",
+};
+
+const flyHudWrap: CSSProperties = {
+  position: "absolute",
+  bottom: 24,
+  left: 24,
+  zIndex: 20,
+  fontFamily: 'ui-monospace, SFMono-Regular, "Cascadia Code", monospace',
+  fontSize: 11,
+  color: "#fff",
+  lineHeight: 1.55,
+  pointerEvents: "none",
+  textShadow: "0 1px 4px rgba(0,0,0,0.8)",
+};
+
+const flyHudStatRow: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  marginBottom: 2,
+};
+
+const flyHudBarTrack: CSSProperties = {
+  display: "inline-block",
+  width: 48,
+  height: 4,
+  background: "rgba(255,255,255,0.2)",
+  borderRadius: 2,
+  overflow: "hidden",
+  verticalAlign: "middle",
+};
+
+const flyHudHelp: CSSProperties = {
+  marginTop: 8,
+  opacity: 0.65,
 };
 
 const searchInput: CSSProperties = {
@@ -801,6 +862,18 @@ function YearScrubber({
   );
 }
 
+const THEME_SWATCH_COLORS = ["#0a1628", "#2d1b4e", "#0d1f1a", "#0a1f12"] as const;
+
+const themeSwitcherWrap: CSSProperties = {
+  position: "absolute",
+  bottom: 368,
+  right: 20,
+  zIndex: 11,
+  display: "flex",
+  gap: 8,
+  alignItems: "center",
+};
+
 const tastePanelWrap: CSSProperties = {
   position: "absolute",
   bottom: 100,
@@ -808,6 +881,41 @@ const tastePanelWrap: CSSProperties = {
   zIndex: 10,
   fontFamily: 'system-ui, -apple-system, "Segoe UI", sans-serif',
 };
+
+function ThemeSwitcher({
+  active,
+  onChange,
+}: {
+  active: number;
+  onChange: (index: number) => void;
+}) {
+  return (
+    <div style={themeSwitcherWrap} role="group" aria-label="City theme">
+      {THEME_NAMES.map((name, i) => (
+        <button
+          key={name}
+          type="button"
+          title={name}
+          aria-label={`${name} theme`}
+          aria-pressed={active === i}
+          onClick={() => onChange(i)}
+          style={{
+            width: 28,
+            height: 28,
+            borderRadius: "50%",
+            backgroundColor: THEME_SWATCH_COLORS[i],
+            border: "0.5px solid rgba(255, 255, 255, 0.3)",
+            padding: 0,
+            cursor: "pointer",
+            ...(active === i
+              ? { outline: "2px solid white", outlineOffset: "2px" }
+              : {}),
+          }}
+        />
+      ))}
+    </div>
+  );
+}
 
 const tasteToggleBtn: CSSProperties = {
   padding: "8px 14px",
@@ -1720,15 +1828,53 @@ export default function CityShell() {
   // Watched store: loaded from localStorage on mount
   const [watchedStore, setWatchedStore] = useState<WatchedStore | null>(null);
   // Counter tracks watched count for live updates without re-reading localStorage
-  const [watchedCount, setWatchedCount] = useState(() =>
-    getWatchedCount(loadStore()),
+  const [watchedCount, setWatchedCount] = useState(
+    () => loadStore().getWatchedCount()
   );
   const [tasteCollapsed, setTasteCollapsed] = useState(false);
+  const [activeTheme, setActiveTheme] = useState(() => {
+    if (typeof window === "undefined") return 0;
+    const n = Number(localStorage.getItem("cinecity_theme") ?? 0);
+    return n >= 0 && n <= 3 ? n : 0;
+  });
   const canvasRef = useRef<CityCanvasHandle>(null);
   const pendingHoverRef = useRef<CityBuilding | null>(null);
   const [screenshotMode, setScreenshotMode] = useState(false);
   const [toastVisible, setToastVisible] = useState(false);
   const [activeGenres, setActiveGenres] = useState<Set<string>>(createAllGenresSet);
+  const [flyMode, setFlyMode] = useState(false);
+  const [flyHud, setFlyHud] = useState({ speed: 0.8, altitude: 120 });
+
+  const handleExitFlyMode = useCallback(() => {
+    setFlyMode(false);
+    setFlyHud({ speed: 0.8, altitude: 120 });
+  }, []);
+
+  const toggleFlyMode = useCallback(() => {
+    if (flyMode) {
+      canvasRef.current?.requestExitFly();
+    } else {
+      setFlyMode(true);
+    }
+  }, [flyMode]);
+
+  const handleFlyHud = useCallback((speed: number, altitude: number) => {
+    setFlyHud({ speed, altitude });
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+      if (e.code === "KeyF" && !e.repeat) {
+        e.preventDefault();
+        toggleFlyMode();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [toggleFlyMode]);
 
   const visibleBuildings = useMemo(() => {
     if (!buildings) return [];
@@ -1777,6 +1923,12 @@ export default function CityShell() {
   const handleSearchSelect = useCallback((building: CityBuilding) => {
     pendingHoverRef.current = building;
     canvasRef.current?.flyTo(building.x, building.z);
+  }, []);
+
+  const handleThemeChange = useCallback((index: number) => {
+    const clamped = Math.max(0, Math.min(3, index));
+    setActiveTheme(clamped);
+    localStorage.setItem("cinecity_theme", String(clamped));
   }, []);
 
   const handleScreenshot = useCallback(async () => {
@@ -1900,7 +2052,58 @@ export default function CityShell() {
 
   return (
     <div style={shell}>
-      {showUi ? <SearchBar buildings={buildings} onSelect={handleSearchSelect} /> : null}
+      {showUi && !flyMode ? (
+        <SearchBar buildings={buildings} onSelect={handleSearchSelect} />
+      ) : null}
+
+      {showUi ? (
+        <div
+          style={{
+            ...flyBtnWrap,
+            left: flyMode ? "50%" : "calc(50% + 176px)",
+            transform: flyMode ? "translateX(-50%)" : undefined,
+          }}
+        >
+          <button
+            type="button"
+            style={{ ...flyBtn, ...(flyMode ? flyBtnActive : {}) }}
+            onClick={toggleFlyMode}
+            aria-pressed={flyMode}
+          >
+            FLY
+          </button>
+        </div>
+      ) : null}
+
+      {showUi && flyMode ? (
+        <div style={flyHudWrap} aria-live="polite">
+          <div style={flyHudStatRow}>
+            <span>
+              SPD {flyHud.speed.toFixed(1)}
+            </span>
+            <span style={flyHudBarTrack} aria-hidden>
+              <span
+                style={{
+                  display: "block",
+                  height: "100%",
+                  width: `${Math.min(100, (flyHud.speed / 7.5) * 100)}%`,
+                  background: "#a8d8a0",
+                  borderRadius: 2,
+                }}
+              />
+            </span>
+          </div>
+          <div>ALT {Math.round(flyHud.altitude)}</div>
+          <div style={flyHudHelp}>
+            <div>MOUSE STEER</div>
+            <div>SHIFT BOOST</div>
+            <div>ALT SLOW</div>
+            <div>SCROLL SPEED</div>
+            <div>R RETURN TO CITY</div>
+            <div>ESC EXIT</div>
+          </div>
+        </div>
+      ) : null}
 
       {showUi ? (
         <GenreFilterPanel activeGenres={activeGenres} onChange={setActiveGenres} />
@@ -1909,8 +2112,11 @@ export default function CityShell() {
       <CityCanvas
         ref={canvasRef}
         buildings={filteredBuildings}
-        themeIndex={0}
+        themeIndex={activeTheme}
         watchedIds={watchedIds}
+        flyMode={flyMode}
+        onExitFlyMode={handleExitFlyMode}
+        onFlyHud={handleFlyHud}
         onBuildingHover={setHoveredBuilding}
         onBuildingClick={openModal}
         onFlyComplete={handleFlyComplete}
@@ -1969,6 +2175,10 @@ export default function CityShell() {
         <span style={{ color: "#4ade80", fontWeight: 700 }}>{watchedCount}</span>{" "}
         building{watchedCount !== 1 ? "s" : ""} explored
         </div>
+      ) : null}
+
+      {showUi ? (
+        <ThemeSwitcher active={activeTheme} onChange={handleThemeChange} />
       ) : null}
 
       {showUi && tasteProfile ? (

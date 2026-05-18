@@ -14,6 +14,7 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, Stats, PerformanceMonitor } from "@react-three/drei";
 import { EffectComposer, Bloom } from "@react-three/postprocessing";
 import * as THREE from "three";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import CityScene from "./CityScene";
 import type { CityBuilding } from "@/lib/city";
 import type { BuildingColors } from "@/lib/window-atlas";
@@ -23,6 +24,7 @@ export type { BuildingColors };
 export interface CityCanvasHandle {
   flyTo: (x: number, z: number) => void;
   captureScreenshot: () => string;
+  requestExitFly: () => void;
 }
 
 export const THEME_NAMES = ["Midnight", "Sunset", "Neon", "Emerald"] as const;
@@ -51,19 +53,20 @@ interface CityTheme {
 
 const THEMES: CityTheme[] = [
   {
+    // Near-black teal sky matching git-city's midnight atmosphere
     sky: [
-      [0, "#000206"],
-      [0.15, "#020814"],
-      [0.3, "#061428"],
-      [0.45, "#0c2040"],
-      [0.55, "#102850"],
-      [0.65, "#0c2040"],
-      [0.8, "#061020"],
-      [1, "#020608"],
+      [0, "#020d12"],
+      [0.15, "#021210"],
+      [0.3, "#031a14"],
+      [0.45, "#041a14"],
+      [0.55, "#041a14"],
+      [0.65, "#031a14"],
+      [0.8, "#021210"],
+      [1, "#020d12"],
     ],
-    fogColor: "#0a1428",
-    fogNear: 400,
-    fogFar: 3500,
+    fogColor: "#041a14",
+    fogNear: 80,
+    fogFar: 500,
     ambientColor: "#4060b0",
     ambientIntensity: 0.55,
     sunColor: "#7090d0",
@@ -202,8 +205,34 @@ const THEMES: CityTheme[] = [
   },
 ];
 
-const ORBIT_TARGET: [number, number, number] = [0, 120, 0];
+// Low target keeps the skyline filling the viewport like git-city
+const ORBIT_TARGET: [number, number, number] = [0, 0, 0];
+const DEFAULT_ORBIT_CAM = new THREE.Vector3(0, 60, 80);
+const DEFAULT_ORBIT_TARGET = new THREE.Vector3(...ORBIT_TARGET);
 const FLY_DURATION_MS = 1200;
+const RETURN_FROM_FLY_MS = 1000;
+const MOUSE_STEER_SENSITIVITY = 0.002;
+const PLANE_BASE_SPEED_DEFAULT = 0.8;
+const PLANE_BASE_SPEED_MIN = 0.3;
+const PLANE_BASE_SPEED_MAX = 3.0;
+const PLANE_COLOR = "#a8d8a0";
+const PLANE_LOCAL_OFFSET = new THREE.Vector3(0, -0.15, -12);
+const PITCH_LIMIT = Math.PI / 2 - 0.12;
+
+const _flyForward = new THREE.Vector3();
+const _flyLookTarget = new THREE.Vector3();
+
+function createPlaneGeometry(): THREE.BufferGeometry {
+  const fuselage = new THREE.BoxGeometry(0.8, 0.4, 3);
+  const wings = new THREE.BoxGeometry(4, 0.2, 1);
+  const tail = new THREE.BoxGeometry(1, 0.8, 0.3);
+  tail.translate(0, 0.2, -1.35);
+  const merged = mergeGeometries([fuselage, wings, tail]);
+  fuselage.dispose();
+  wings.dispose();
+  tail.dispose();
+  return merged ?? fuselage;
+}
 
 interface FlyAnimation {
   startTime: number;
@@ -276,6 +305,47 @@ function Ground({ color, grid1, grid2 }: { color: string; grid1: string; grid2: 
   );
 }
 
+/** 200 small white star particles scattered in an upper-hemisphere shell — git-city starfield effect */
+function Starfield() {
+  const points = useMemo(() => {
+    const positions = new Float32Array(200 * 3);
+    for (let i = 0; i < 200; i++) {
+      // Shell distribution between radius 400–500 keeps stars
+      // behind the sky dome but clearly visible
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(Math.random()); // upper hemisphere only
+      const r = 400 + Math.random() * 100;
+      positions[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+      positions[i * 3 + 1] = r * Math.cos(phi);
+      positions[i * 3 + 2] = r * Math.sin(phi) * Math.sin(theta);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    return geo;
+  }, []);
+
+  const material = useMemo(
+    () =>
+      new THREE.PointsMaterial({
+        color: 0xffffff,
+        size: 0.4,
+        sizeAttenuation: false,
+        fog: false,
+        depthWrite: false,
+      }),
+    [],
+  );
+
+  useEffect(() => {
+    return () => {
+      points.dispose();
+      material.dispose();
+    };
+  }, [points, material]);
+
+  return <points args={[points, material]} renderOrder={-2} />;
+}
+
 /** Registers gl.domElement capture on the canvas imperative handle. */
 function ScreenshotCapture({
   captureApiRef,
@@ -298,12 +368,181 @@ function ScreenshotCapture({
   return null;
 }
 
-function OrbitScene({
-  flyApiRef,
-  onFlyComplete,
+function PlaneFlight({
+  controlsRef,
+  exitRequestRef,
+  onExitComplete,
+  onHud,
 }: {
+  controlsRef: React.RefObject<React.ComponentRef<typeof OrbitControls> | null>;
+  exitRequestRef: React.MutableRefObject<(() => void) | null>;
+  onExitComplete: () => void;
+  onHud: (speed: number, altitude: number) => void;
+}) {
+  const { camera } = useThree();
+  const planeGeom = useMemo(() => createPlaneGeometry(), []);
+  const planeMat = useMemo(
+    () => new THREE.MeshBasicMaterial({ color: PLANE_COLOR }),
+    [],
+  );
+  const baseSpeed = useRef(PLANE_BASE_SPEED_DEFAULT);
+  const yaw = useRef(0);
+  const pitch = useRef(0);
+  const mouseOffset = useRef({ x: 0, y: 0 });
+  const keys = useRef<Record<string, boolean>>({});
+  const exiting = useRef(false);
+  const exitStart = useRef(0);
+  const exitFromPos = useRef(new THREE.Vector3());
+  const exitFromLook = useRef(new THREE.Vector3());
+  const hudTimer = useRef(0);
+  const planeMeshRef = useRef<THREE.Mesh | null>(null);
+
+  const beginExit = useCallback(() => {
+    if (exiting.current) return;
+    exiting.current = true;
+    exitStart.current = performance.now();
+    exitFromPos.current.copy(camera.position);
+    camera.getWorldDirection(_flyForward);
+    exitFromLook.current.copy(camera.position).add(_flyForward);
+    if (planeMeshRef.current) {
+      camera.remove(planeMeshRef.current);
+      planeMeshRef.current = null;
+    }
+  }, [camera]);
+
+  useEffect(() => {
+    exitRequestRef.current = beginExit;
+    return () => {
+      exitRequestRef.current = null;
+    };
+  }, [beginExit, exitRequestRef]);
+
+  useEffect(() => {
+    const euler = new THREE.Euler().setFromQuaternion(camera.quaternion, "YXZ");
+    yaw.current = euler.y;
+    pitch.current = euler.x;
+  }, [camera]);
+
+  useEffect(() => {
+    const mesh = new THREE.Mesh(planeGeom, planeMat);
+    mesh.position.copy(PLANE_LOCAL_OFFSET);
+    planeMeshRef.current = mesh;
+    camera.add(mesh);
+    return () => {
+      if (planeMeshRef.current) {
+        camera.remove(planeMeshRef.current);
+        planeMeshRef.current = null;
+      }
+      planeGeom.dispose();
+      planeMat.dispose();
+    };
+  }, [camera, planeGeom, planeMat]);
+
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (exiting.current) return;
+      mouseOffset.current.x = e.clientX - window.innerWidth / 2;
+      mouseOffset.current.y = e.clientY - window.innerHeight / 2;
+    };
+    const onWheel = (e: WheelEvent) => {
+      if (exiting.current) return;
+      e.preventDefault();
+      baseSpeed.current = THREE.MathUtils.clamp(
+        baseSpeed.current - e.deltaY * 0.001,
+        PLANE_BASE_SPEED_MIN,
+        PLANE_BASE_SPEED_MAX,
+      );
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      keys.current[e.code] = true;
+      if (e.code === "Escape" || e.code === "KeyR") {
+        e.preventDefault();
+        beginExit();
+      }
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      keys.current[e.code] = false;
+    };
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("wheel", onWheel, { passive: false });
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("wheel", onWheel);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
+  }, [beginExit]);
+
+  useFrame(() => {
+    if (exiting.current) {
+      const elapsed = performance.now() - exitStart.current;
+      const t = Math.min(1, elapsed / RETURN_FROM_FLY_MS);
+      const eased = t * t * (3 - 2 * t);
+
+      camera.position.lerpVectors(exitFromPos.current, DEFAULT_ORBIT_CAM, eased);
+      _flyLookTarget.lerpVectors(exitFromLook.current, DEFAULT_ORBIT_TARGET, eased);
+      camera.lookAt(_flyLookTarget);
+
+      if (t >= 1) {
+        camera.position.copy(DEFAULT_ORBIT_CAM);
+        camera.lookAt(DEFAULT_ORBIT_TARGET);
+        const controls = controlsRef.current;
+        if (controls) {
+          controls.target.copy(DEFAULT_ORBIT_TARGET);
+          controls.update();
+        }
+        exiting.current = false;
+        onExitComplete();
+      }
+      return;
+    }
+
+    yaw.current -= mouseOffset.current.x * MOUSE_STEER_SENSITIVITY;
+    pitch.current -= mouseOffset.current.y * MOUSE_STEER_SENSITIVITY;
+    pitch.current = THREE.MathUtils.clamp(pitch.current, -PITCH_LIMIT, PITCH_LIMIT);
+
+    camera.rotation.order = "YXZ";
+    camera.rotation.x = pitch.current;
+    camera.rotation.y = yaw.current;
+    camera.rotation.z = 0;
+
+    let speedMult = 1;
+    if (keys.current.ShiftLeft || keys.current.ShiftRight) {
+      speedMult = 2.5;
+    } else if (keys.current.AltLeft || keys.current.AltRight) {
+      speedMult = 0.3;
+    }
+
+    const speed = baseSpeed.current * speedMult;
+    camera.getWorldDirection(_flyForward);
+    camera.position.addScaledVector(_flyForward, speed);
+
+    hudTimer.current += 1;
+    if (hudTimer.current % 4 === 0) {
+      onHud(speed, camera.position.y);
+    }
+  });
+
+  return null;
+}
+
+function SceneControls({
+  flyMode,
+  flyApiRef,
+  exitFlyRef,
+  onFlyComplete,
+  onExitFlyMode,
+  onFlyHud,
+}: {
+  flyMode: boolean;
   flyApiRef: React.MutableRefObject<FlyApi | null>;
+  exitFlyRef: React.MutableRefObject<(() => void) | null>;
   onFlyComplete?: () => void;
+  onExitFlyMode?: () => void;
+  onFlyHud?: (speed: number, altitude: number) => void;
 }) {
   const controlsRef = useRef<React.ComponentRef<typeof OrbitControls>>(null);
   const { camera } = useThree();
@@ -312,13 +551,14 @@ function OrbitScene({
   onCompleteRef.current = onFlyComplete;
 
   useEffect(() => {
-    camera.position.set(-800, 700, -1000);
-    camera.lookAt(...ORBIT_TARGET);
+    camera.position.copy(DEFAULT_ORBIT_CAM);
+    camera.lookAt(DEFAULT_ORBIT_TARGET);
   }, [camera]);
 
   useEffect(() => {
     flyApiRef.current = {
       flyTo(x: number, z: number) {
+        if (flyMode) return;
         const controls = controlsRef.current;
         if (!controls) return;
 
@@ -335,9 +575,11 @@ function OrbitScene({
     return () => {
       flyApiRef.current = null;
     };
-  }, [camera, flyApiRef]);
+  }, [camera, flyApiRef, flyMode]);
 
   useFrame(() => {
+    if (flyMode) return;
+
     const fly = flyRef.current;
     const controls = controlsRef.current;
     if (!fly || !controls) return;
@@ -357,17 +599,29 @@ function OrbitScene({
   });
 
   return (
-    <OrbitControls
-      ref={controlsRef}
-      enableDamping
-      dampingFactor={0.06}
-      minDistance={40}
-      maxDistance={2500}
-      maxPolarAngle={Math.PI / 2.1}
-      target={ORBIT_TARGET}
-      autoRotate
-      autoRotateSpeed={0.15}
-    />
+    <>
+      {!flyMode && (
+        <OrbitControls
+          ref={controlsRef}
+          enableDamping
+          dampingFactor={0.06}
+          minDistance={10}
+          maxDistance={300}
+          maxPolarAngle={Math.PI / 2.1}
+          target={ORBIT_TARGET}
+          autoRotate
+          autoRotateSpeed={0.15}
+        />
+      )}
+      {flyMode && (
+        <PlaneFlight
+          controlsRef={controlsRef}
+          exitRequestRef={exitFlyRef}
+          onExitComplete={() => onExitFlyMode?.()}
+          onHud={onFlyHud ?? (() => {})}
+        />
+      )}
+    </>
   );
 }
 
@@ -375,6 +629,9 @@ interface CityCanvasProps {
   buildings: CityBuilding[];
   themeIndex?: number;
   watchedIds?: Set<number>;
+  flyMode?: boolean;
+  onExitFlyMode?: () => void;
+  onFlyHud?: (speed: number, altitude: number) => void;
   onBuildingClick?: (building: CityBuilding) => void;
   onBuildingHover?: (building: CityBuilding | null) => void;
   onFlyComplete?: () => void;
@@ -385,6 +642,9 @@ function CityCanvasInner(
     buildings,
     themeIndex = 0,
     watchedIds,
+    flyMode = false,
+    onExitFlyMode,
+    onFlyHud,
     onBuildingClick,
     onBuildingHover,
     onFlyComplete,
@@ -397,6 +657,7 @@ function CityCanvasInner(
   const [dpr, setDpr] = useState(1);
   const [bloomEnabled, setBloomEnabled] = useState(false);
   const flyApiRef = useRef<FlyApi | null>(null);
+  const exitFlyRef = useRef<(() => void) | null>(null);
   const captureApiRef = useRef<{ capturePng: () => string } | null>(null);
 
   useImperativeHandle(
@@ -408,13 +669,16 @@ function CityCanvasInner(
       captureScreenshot() {
         return captureApiRef.current?.capturePng() ?? "";
       },
+      requestExitFly() {
+        exitFlyRef.current?.();
+      },
     }),
     [],
   );
 
   return (
     <Canvas
-      camera={{ position: [-400, 450, -600], fov: 55, near: 0.5, far: 15000 }}
+      camera={{ position: [0, 60, 80], fov: 55, near: 0.5, far: 15000 }}
       dpr={dpr}
       gl={{
         antialias: false,
@@ -443,8 +707,16 @@ function CityCanvasInner(
       <hemisphereLight args={[t.hemiSky, t.hemiGround, t.hemiIntensity * 3.5]} />
 
       <SkyDome stops={t.sky} />
+      <Starfield />
       <ScreenshotCapture captureApiRef={captureApiRef} />
-      <OrbitScene flyApiRef={flyApiRef} onFlyComplete={onFlyComplete} />
+      <SceneControls
+        flyMode={flyMode}
+        flyApiRef={flyApiRef}
+        exitFlyRef={exitFlyRef}
+        onFlyComplete={onFlyComplete}
+        onExitFlyMode={onExitFlyMode}
+        onFlyHud={onFlyHud}
+      />
       <Ground color={t.groundColor} grid1={t.grid1} grid2={t.grid2} />
 
       <CityScene

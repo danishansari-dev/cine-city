@@ -5,6 +5,7 @@ import { createWindowAtlas } from "@/lib/window-atlas";
 import type { BuildingColors } from "@/lib/window-atlas";
 import type { CityBuilding } from "@/lib/city";
 import InstancedBuildings from "./InstancedBuildings";
+import BuildingLabels from "./BuildingLabels";
 
 interface CitySceneProps {
   buildings: CityBuilding[];
@@ -29,13 +30,17 @@ export default function CityScene({
   }, [atlasTexture]);
 
   return (
-    <InstancedBuildings
-      buildings={buildings}
-      colors={colors}
-      atlasTexture={atlasTexture}
-      watchedIds={watchedIds}
-      onBuildingClick={onBuildingClick}
-      onBuildingHover={onBuildingHover}
-    />
+    <>
+      <InstancedBuildings
+        buildings={buildings}
+        colors={colors}
+        atlasTexture={atlasTexture}
+        watchedIds={watchedIds}
+        onBuildingClick={onBuildingClick}
+        onBuildingHover={onBuildingHover}
+      />
+      {/* Floating movie title labels — "Movie Name (Year)" above each building */}
+      <BuildingLabels buildings={buildings} />
+    </>
   );
 }
